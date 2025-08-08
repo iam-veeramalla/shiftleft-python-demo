@@ -39,21 +39,57 @@ def log_entry():
 
 @bp.route("/grep_processes")
 def grep_processes():
+# Setup logger for security monitoring
+logger = logging.getLogger(__name__)
+
+# Setup rate limiter
+limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=["200 per day", "50 per hour"]
+)
+
+def is_safe_input(input_str):
+    """Validate input against allowlist pattern"""
+    return bool(re.match(r'^[a-zA-Z0-9_\-]+$', input_str))
+
+def validate_input(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        name = request.args.get("name")
+        # Sanitize input using bleach
+        sanitized_name = clean(name) if name else ""
+        
+        # Log the access attempt
+        logger.info(f"Process search requested for: {sanitized_name}")
+        
+        if not name or not isinstance(name, str) or not is_safe_input(name):
+            return jsonify({"error": "invalid parameter"})
+        return func(*args, **kwargs)
+    return wrapper
+
+@limiter.limit("10 per minute")
+@validate_input
+def grep_processes():
     name = request.args.get("name")
-    # vulnerability: Remote Code Execution
+    # Input already validated by decorator
+    
+    # Fixed: Avoiding shell=True and using array arguments
     res = subprocess.run(
-        ["ps aux | grep " + name + " | awk '{print $11}'"],
-        shell=True,
-        capture_output=True,
+        ["ps", "aux"], 
+        capture_output=True, 
+        text=True,
+        shell=False
     )
-    if res.stdout is None:
-        return jsonify({"error": "no stdout returned"})
-    out = res.stdout.decode("utf-8")
-    names = out.split("\n")
-    return jsonify({"success": True, "names": names})
+    
+    # Filter results in Python rather than using grep/awk with shell=True
+    if res.stdout:
+        lines = res.stdout.splitlines()
+        matching_processes = [line.split()[10] if len(line.split()) > 10 else "" 
+                             for line in lines if name in line]
+        return jsonify({"success": True, "names": matching_processes})
+    
+    return jsonify({"error": "no stdout returned"})
 
-
-@bp.route("/deserialized_descr", methods=["POST"])
 def deserialized_descr():
     pickled = request.form.get('pickled')
     data = base64.urlsafe_b64decode(pickled)
